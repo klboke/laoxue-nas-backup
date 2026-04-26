@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use base64::prelude::*;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use ftp::types::{FileType, FtpError};
@@ -19,7 +20,7 @@ use std::time::{Duration, Instant};
 struct Config {
     cpanel_base_url: String,
     cpanel_username: String,
-    cpanel_api_token: String,
+    cpanel_auth: CpanelAuth,
     cpanel_backup_email: Option<String>,
     cpanel_include_home: bool,
     ftp_host: String,
@@ -38,15 +39,16 @@ struct Config {
     schedule_interval: Duration,
 }
 
+#[derive(Clone, Debug)]
+enum CpanelAuth {
+    ApiToken(String),
+    Password(String),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RunMode {
     Once,
     Daemon,
-}
-
-#[derive(Debug, Deserialize)]
-struct UapiEnvelope {
-    result: UapiResult,
 }
 
 #[derive(Debug, Deserialize)]
@@ -107,7 +109,7 @@ impl Config {
                 .trim_end_matches('/')
                 .to_string(),
             cpanel_username: env_req("CPANEL_USERNAME")?,
-            cpanel_api_token: env_req("CPANEL_API_TOKEN")?,
+            cpanel_auth: CpanelAuth::from_env()?,
             cpanel_backup_email: env_opt("CPANEL_BACKUP_EMAIL"),
             cpanel_include_home: env_bool("CPANEL_INCLUDE_HOME", true)?,
             ftp_host: env_req("CPANEL_FTP_HOST")?,
@@ -127,6 +129,19 @@ impl Config {
             run_mode,
             schedule_interval: Duration::from_secs(env_u64("SCHEDULE_INTERVAL_SECS", 86_400)?),
         })
+    }
+}
+
+impl CpanelAuth {
+    fn from_env() -> Result<Self> {
+        if let Some(token) = env_opt("CPANEL_API_TOKEN").filter(|value| !value.trim().is_empty()) {
+            return Ok(Self::ApiToken(token));
+        }
+        if let Some(password) = env_opt("CPANEL_PASSWORD").filter(|value| !value.trim().is_empty())
+        {
+            return Ok(Self::Password(password));
+        }
+        bail!("set either CPANEL_API_TOKEN or CPANEL_PASSWORD");
     }
 }
 
@@ -230,13 +245,19 @@ impl<'a> CpanelClient<'a> {
                 self.config.cpanel_base_url, endpoint, query
             )
         };
-        let auth = format!(
-            "cpanel {}:{}",
-            self.config.cpanel_username, self.config.cpanel_api_token
-        );
-        let response = minreq::get(url)
-            .with_header("Authorization", auth)
-            .with_header("Accept", "application/json")
+        let mut request = minreq::get(url).with_header("Accept", "application/json");
+        request = match &self.config.cpanel_auth {
+            CpanelAuth::ApiToken(token) => {
+                let auth = format!("cpanel {}:{}", self.config.cpanel_username, token);
+                request.with_header("Authorization", auth)
+            }
+            CpanelAuth::Password(password) => {
+                let credential = format!("{}:{}", self.config.cpanel_username, password);
+                let auth = format!("Basic {}", BASE64_STANDARD.encode(credential));
+                request.with_header("Authorization", auth)
+            }
+        };
+        let response = request
             .with_timeout(30)
             .send()
             .context("send cPanel UAPI request")?;
@@ -249,17 +270,21 @@ impl<'a> CpanelClient<'a> {
             bail!("cPanel UAPI returned HTTP {status}: {body}");
         }
 
-        let envelope: UapiEnvelope =
-            serde_json::from_str(body).context("parse cPanel UAPI JSON")?;
-        if envelope.result.status != 1 {
+        let root: Value = serde_json::from_str(body).context("parse cPanel UAPI JSON")?;
+        let result: UapiResult = if let Some(result) = root.get("result") {
+            serde_json::from_value(result.clone()).context("parse cPanel UAPI result")?
+        } else {
+            serde_json::from_value(root).context("parse cPanel UAPI top-level result")?
+        };
+        if result.status != 1 {
             bail!(
                 "cPanel UAPI failed: errors={:?} messages={:?} warnings={:?}",
-                envelope.result.errors,
-                envelope.result.messages,
-                envelope.result.warnings
+                result.errors,
+                result.messages,
+                result.warnings
             );
         }
-        Ok(envelope.result.data)
+        Ok(result.data)
     }
 }
 

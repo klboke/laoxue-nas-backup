@@ -8,6 +8,7 @@ description = "Pull cPanel full backups to a NAS volume."
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 ftp = "3.0.1"

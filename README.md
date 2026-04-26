@@ -14,9 +14,9 @@ The container is designed for NAS use:
 
 ## Security model
 
-Keep secrets out of Git. Copy `config.example.env` to `.env` on the NAS and fill in the cPanel API token and FTP password there.
+Keep secrets out of Git. Copy `config.example.env` to `.env` on the NAS and fill in the cPanel password or API token and the FTP password there.
 
-The first version uses cPanel API token authentication for UAPI and plain FTP for downloading the generated backup file. If the host enables FTPS/SFTP-only access later, add that transport before disabling FTP.
+The runner uses cPanel UAPI over HTTPS with either BasicAuth (`CPANEL_PASSWORD`) or an API token (`CPANEL_API_TOKEN`). It uses plain FTP for downloading the generated backup file. If the host enables FTPS/SFTP-only access later, add that transport before disabling FTP.
 
 ## Build
 
@@ -64,7 +64,7 @@ For an exact wall-clock schedule, keep `RUN_MODE=once` and use the NAS scheduler
 | --- | --- |
 | `CPANEL_BASE_URL` | cPanel base URL, for example `https://cpanel.example.com:2083` |
 | `CPANEL_USERNAME` | cPanel account username |
-| `CPANEL_API_TOKEN` | cPanel API token with access to backup functions |
+| `CPANEL_PASSWORD` | cPanel account password for BasicAuth; leave empty when using `CPANEL_API_TOKEN` |
 | `CPANEL_FTP_HOST` | FTP host for the cPanel account |
 | `CPANEL_FTP_USERNAME` | FTP username |
 | `CPANEL_FTP_PASSWORD` | FTP password |
@@ -74,6 +74,7 @@ For an exact wall-clock schedule, keep `RUN_MODE=once` and use the NAS scheduler
 | Variable | Default | Description |
 | --- | --- | --- |
 | `BACKUP_DIR` | `/backups` | Local directory inside the container |
+| `CPANEL_API_TOKEN` | empty | cPanel API token with access to backup functions; takes precedence over `CPANEL_PASSWORD` |
 | `CPANEL_INCLUDE_HOME` | `true` | Include home directory in the full backup |
 | `CPANEL_BACKUP_EMAIL` | empty | Optional cPanel completion email |
 | `CPANEL_FTP_PORT` | `21` | FTP port |
@@ -81,7 +82,7 @@ For an exact wall-clock schedule, keep `RUN_MODE=once` and use the NAS scheduler
 | `DELETE_REMOTE_AFTER_DOWNLOAD` | `true` | Remove the cPanel-side temporary backup after a verified download |
 | `VERIFY_ARCHIVE` | `true` | Check archive entries after download |
 | `EXPECTED_ARCHIVE_ENTRIES` | `homedir/public_html,mysql/` | Comma-separated archive path prefixes to verify |
-| `RETENTION_KEEP_LAST` | `14` | Keep the latest N local backup archives |
+| `RETENTION_KEEP_LAST` | `7` | Keep the latest N local backup archives |
 | `POLL_INTERVAL_SECS` | `60` | Poll interval while cPanel creates the backup |
 | `BACKUP_TIMEOUT_SECS` | `7200` | Maximum wait time for cPanel backup completion |
 | `RUN_MODE` | `once` | `once` or `daemon` |
