@@ -178,8 +178,9 @@ fn run_once(config: &Config) -> Result<()> {
 }
 
 fn finish_remote_backup(config: &Config, remote_file: &str) -> Result<()> {
+    let remote_size = wait_for_remote_size_to_settle(config, remote_file)?;
     let final_path = config.backup_dir.join(&remote_file);
-    let sha256 = download_backup(config, &remote_file, &final_path)
+    let sha256 = download_backup(config, &remote_file, &final_path, remote_size)
         .with_context(|| format!("download {remote_file}"))?;
     write_sha256(&final_path, &sha256)?;
     println!(
@@ -310,7 +311,6 @@ fn wait_for_new_backup(config: &Config, before: &[String]) -> Result<String> {
 
         if let Some(candidate) = candidates.pop() {
             println!("{} candidate backup file: {}", now(), candidate);
-            wait_for_remote_size_to_settle(config, &candidate)?;
             return Ok(candidate);
         }
 
@@ -347,7 +347,7 @@ fn is_backup_archive_name(name: &str) -> bool {
     name.starts_with("backup-") && (name.ends_with(".tar.gz") || name.ends_with(".tar"))
 }
 
-fn wait_for_remote_size_to_settle(config: &Config, remote_file: &str) -> Result<()> {
+fn wait_for_remote_size_to_settle(config: &Config, remote_file: &str) -> Result<usize> {
     let started = Instant::now();
     let mut last_size = None;
     let mut stable_checks = 0;
@@ -371,7 +371,7 @@ fn wait_for_remote_size_to_settle(config: &Config, remote_file: &str) -> Result<
 
                 if stable_checks >= 1 {
                     println!("{} remote backup size is stable: {} bytes", now(), size);
-                    return Ok(());
+                    return Ok(size);
                 }
 
                 println!(
@@ -404,27 +404,67 @@ fn read_remote_size(config: &Config, remote_file: &str) -> Result<usize> {
     Ok(size)
 }
 
-fn download_backup(config: &Config, remote_file: &str, final_path: &Path) -> Result<String> {
+fn download_backup(
+    config: &Config,
+    remote_file: &str,
+    final_path: &Path,
+    expected_size: usize,
+) -> Result<String> {
     let temp_path = sibling_path_with_suffix(final_path, ".part")?;
     if temp_path.exists() {
         fs::remove_file(&temp_path)
             .with_context(|| format!("remove stale temp file {}", temp_path.display()))?;
     }
 
+    println!(
+        "{} downloading {} bytes from {}",
+        now(),
+        expected_size,
+        remote_file
+    );
     let mut ftp = ftp_connect(config)?;
     let sha256 = ftp
         .retr(remote_file, |stream| {
             let mut out = File::create(&temp_path).map_err(FtpError::ConnectionError)?;
             let mut hasher = Sha256::new();
             let mut buf = [0_u8; 64 * 1024];
+            let mut downloaded = 0_usize;
+            let mut next_progress_log = 32 * 1024 * 1024;
             loop {
-                let n = stream.read(&mut buf).map_err(FtpError::ConnectionError)?;
+                if expected_size > 0 && downloaded >= expected_size {
+                    break;
+                }
+                let read_limit = if expected_size > 0 {
+                    buf.len().min(expected_size - downloaded)
+                } else {
+                    buf.len()
+                };
+                let n = stream
+                    .read(&mut buf[..read_limit])
+                    .map_err(FtpError::ConnectionError)?;
                 if n == 0 {
                     break;
                 }
                 out.write_all(&buf[..n])
                     .map_err(FtpError::ConnectionError)?;
                 hasher.update(&buf[..n]);
+                downloaded += n;
+                if downloaded >= next_progress_log
+                    || (expected_size > 0 && downloaded >= expected_size)
+                {
+                    println!(
+                        "{} downloaded {} / {} bytes",
+                        now(),
+                        downloaded,
+                        expected_size
+                    );
+                    next_progress_log += 32 * 1024 * 1024;
+                }
+            }
+            if expected_size > 0 && downloaded != expected_size {
+                return Err(FtpError::InvalidResponse(format!(
+                    "downloaded {downloaded} bytes, expected {expected_size}"
+                )));
             }
             out.sync_all().map_err(FtpError::ConnectionError)?;
             Ok(format!("{:x}", hasher.finalize()))
