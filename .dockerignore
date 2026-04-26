@@ -1,0 +1,7 @@
+/target
+/.git
+/.env
+/.DS_Store
+*.log
+*.tar.gz
+*.part

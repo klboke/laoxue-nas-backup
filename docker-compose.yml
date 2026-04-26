@@ -1,0 +1,9 @@
+services:
+  cpanel-nas-backup:
+    build: .
+    image: cpanel-nas-backup:latest
+    restart: "no"
+    env_file:
+      - .env
+    volumes:
+      - ./backups:/backups

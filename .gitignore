@@ -1,0 +1,7 @@
+/target/
+/.env
+/.DS_Store
+*.log
+*.tar.gz
+*.tar.gz.part
+*.sha256
