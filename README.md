@@ -5,7 +5,7 @@ Rust backup runner for pulling a cPanel full backup into a NAS-mounted Docker vo
 The container is designed for NAS use:
 
 - triggers a cPanel full backup with UAPI
-- polls until the new backup archive is visible
+- polls FTP until the new backup archive is visible
 - downloads the archive through FTP into `/backups`
 - writes a `.sha256` checksum next to the archive
 - optionally verifies expected archive entries, such as `homedir/public_html` and `mysql/example_database.sql`
@@ -17,6 +17,8 @@ The container is designed for NAS use:
 Keep secrets out of Git. Copy `config.example.env` to `.env` on the NAS and fill in the cPanel password or API token and the FTP password there.
 
 The runner uses cPanel UAPI over HTTPS with either BasicAuth (`CPANEL_PASSWORD`) or an API token (`CPANEL_API_TOKEN`). It uses plain FTP for downloading the generated backup file. If the host enables FTPS/SFTP-only access later, add that transport before disabling FTP.
+
+Some cPanel hosts return an empty `Backup/list_backups` response even after the archive has been created. For that reason, completion detection uses FTP directory listing rather than the cPanel backup list API.
 
 ## Build
 

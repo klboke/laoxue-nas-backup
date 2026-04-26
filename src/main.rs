@@ -147,22 +147,37 @@ impl CpanelAuth {
 
 fn run_once(config: &Config) -> Result<()> {
     println!("{} starting backup job", now());
+
+    let before = list_remote_backup_files(config).context("list FTP backups before trigger")?;
+    println!("{} existing FTP backup files: {}", now(), before.len());
+
+    if let Some(remote_file) = before
+        .iter()
+        .filter(|file| !config.backup_dir.join(file).exists())
+        .last()
+    {
+        println!(
+            "{} existing remote backup detected: {}; downloading it before triggering a new backup",
+            now(),
+            remote_file
+        );
+        return finish_remote_backup(config, remote_file);
+    }
+
     let client = CpanelClient::new(config);
-
-    let before = client
-        .list_backups()
-        .context("list backups before trigger")?;
-    println!("{} existing cPanel backup files: {}", now(), before.len());
-
     let pid = client
         .start_full_backup(config)
         .context("trigger cPanel full backup")?;
     println!("{} cPanel full backup started, pid={}", now(), pid);
 
-    let remote_file = wait_for_new_backup(config, &client, &before)
-        .context("wait for cPanel backup to complete")?;
+    let remote_file =
+        wait_for_new_backup(config, &before).context("wait for cPanel backup to complete")?;
     println!("{} new backup detected: {}", now(), remote_file);
 
+    finish_remote_backup(config, &remote_file)
+}
+
+fn finish_remote_backup(config: &Config, remote_file: &str) -> Result<()> {
     let final_path = config.backup_dir.join(&remote_file);
     let sha256 = download_backup(config, &remote_file, &final_path)
         .with_context(|| format!("download {remote_file}"))?;
@@ -217,18 +232,6 @@ impl<'a> CpanelClient<'a> {
             .unwrap_or("unknown")
             .to_string();
         Ok(pid)
-    }
-
-    fn list_backups(&self) -> Result<Vec<String>> {
-        let value = self.uapi_get("Backup/list_backups", &[])?;
-        let data = value
-            .as_array()
-            .ok_or_else(|| anyhow!("Backup/list_backups did not return an array"))?;
-        Ok(data
-            .iter()
-            .filter_map(Value::as_str)
-            .map(ToOwned::to_owned)
-            .collect())
     }
 
     fn uapi_get(&self, endpoint: &str, params: &[(&str, String)]) -> Result<Value> {
@@ -288,11 +291,7 @@ impl<'a> CpanelClient<'a> {
     }
 }
 
-fn wait_for_new_backup(
-    config: &Config,
-    client: &CpanelClient<'_>,
-    before: &[String],
-) -> Result<String> {
+fn wait_for_new_backup(config: &Config, before: &[String]) -> Result<String> {
     let before_set: HashSet<&str> = before.iter().map(String::as_str).collect();
     let started = Instant::now();
     loop {
@@ -303,11 +302,9 @@ fn wait_for_new_backup(
             );
         }
 
-        let mut candidates = client
-            .list_backups()?
+        let mut candidates = list_remote_backup_files(config)?
             .into_iter()
             .filter(|file| !before_set.contains(file.as_str()))
-            .filter(|file| file.ends_with(".tar.gz") || file.ends_with(".tar"))
             .collect::<Vec<_>>();
         candidates.sort();
 
@@ -324,6 +321,30 @@ fn wait_for_new_backup(
         );
         thread::sleep(config.poll_interval);
     }
+}
+
+fn list_remote_backup_files(config: &Config) -> Result<Vec<String>> {
+    let mut ftp = ftp_connect(config)?;
+    let entries = ftp.nlst(None).context("list FTP backup directory")?;
+    let _ = ftp.quit();
+
+    let mut backups = entries
+        .into_iter()
+        .filter_map(|entry| {
+            Path::new(&entry)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .filter(|name| is_backup_archive_name(name))
+        .collect::<Vec<_>>();
+    backups.sort();
+    backups.dedup();
+    Ok(backups)
+}
+
+fn is_backup_archive_name(name: &str) -> bool {
+    name.starts_with("backup-") && (name.ends_with(".tar.gz") || name.ends_with(".tar"))
 }
 
 fn wait_for_remote_size_to_settle(config: &Config, remote_file: &str) -> Result<()> {
