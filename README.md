@@ -26,6 +26,12 @@ docker build -t cpanel-nas-backup:latest .
 
 The runtime image is `scratch`; it contains only the compiled Rust binary.
 
+The published multi-architecture image is:
+
+```text
+ghcr.io/klboke/cpanel-nas-backup:latest
+```
+
 ## Run once
 
 ```bash
