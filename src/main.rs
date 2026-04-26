@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::prelude::*;
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
-use ftp::types::{FileType, FtpError};
+use ftp::types::FileType;
 use ftp::FtpStream;
 use serde::Deserialize;
 use serde_json::Value;
@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -423,54 +423,59 @@ fn download_backup(
         remote_file
     );
     let mut ftp = ftp_connect(config)?;
-    let sha256 = ftp
-        .retr(remote_file, |stream| {
-            let mut out = File::create(&temp_path).map_err(FtpError::ConnectionError)?;
-            let mut hasher = Sha256::new();
-            let mut buf = [0_u8; 64 * 1024];
-            let mut downloaded = 0_usize;
-            let mut next_progress_log = 32 * 1024 * 1024;
-            loop {
-                if expected_size > 0 && downloaded >= expected_size {
-                    break;
-                }
-                let read_limit = if expected_size > 0 {
-                    buf.len().min(expected_size - downloaded)
-                } else {
-                    buf.len()
-                };
-                let n = stream
-                    .read(&mut buf[..read_limit])
-                    .map_err(FtpError::ConnectionError)?;
-                if n == 0 {
-                    break;
-                }
-                out.write_all(&buf[..n])
-                    .map_err(FtpError::ConnectionError)?;
-                hasher.update(&buf[..n]);
-                downloaded += n;
-                if downloaded >= next_progress_log
-                    || (expected_size > 0 && downloaded >= expected_size)
-                {
-                    println!(
-                        "{} downloaded {} / {} bytes",
-                        now(),
-                        downloaded,
-                        expected_size
-                    );
-                    next_progress_log += 32 * 1024 * 1024;
-                }
-            }
-            if expected_size > 0 && downloaded != expected_size {
-                return Err(FtpError::InvalidResponse(format!(
-                    "downloaded {downloaded} bytes, expected {expected_size}"
-                )));
-            }
-            out.sync_all().map_err(FtpError::ConnectionError)?;
-            Ok(format!("{:x}", hasher.finalize()))
-        })
-        .map_err(|err| anyhow!("FTP RETR failed: {err}"))?;
-    let _ = ftp.quit();
+    let mut stream = ftp
+        .get(remote_file)
+        .map_err(|err| anyhow!("start FTP RETR failed: {err}"))?;
+    stream
+        .get_ref()
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_secs(120)))
+        .context("set FTP data read timeout")?;
+
+    let mut out = File::create(&temp_path)
+        .with_context(|| format!("create temp backup {}", temp_path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 64 * 1024];
+    let mut downloaded = 0_usize;
+    let mut next_progress_log = 32 * 1024 * 1024;
+    loop {
+        if expected_size > 0 && downloaded >= expected_size {
+            break;
+        }
+        let read_limit = if expected_size > 0 {
+            buf.len().min(expected_size - downloaded)
+        } else {
+            buf.len()
+        };
+        let n = stream
+            .read(&mut buf[..read_limit])
+            .context("read FTP data stream")?;
+        if n == 0 {
+            break;
+        }
+        out.write_all(&buf[..n])
+            .with_context(|| format!("write temp backup {}", temp_path.display()))?;
+        hasher.update(&buf[..n]);
+        downloaded += n;
+        if downloaded >= next_progress_log || (expected_size > 0 && downloaded >= expected_size) {
+            println!(
+                "{} downloaded {} / {} bytes",
+                now(),
+                downloaded,
+                expected_size
+            );
+            let _ = std::io::stdout().flush();
+            next_progress_log += 32 * 1024 * 1024;
+        }
+    }
+    if expected_size > 0 && downloaded != expected_size {
+        bail!("downloaded {downloaded} bytes, expected {expected_size}");
+    }
+    out.sync_all()
+        .with_context(|| format!("sync temp backup {}", temp_path.display()))?;
+    let sha256 = format!("{:x}", hasher.finalize());
+    drop(stream);
+    drop(ftp);
 
     fs::rename(&temp_path, final_path).with_context(|| {
         format!(
