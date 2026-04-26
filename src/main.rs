@@ -31,6 +31,8 @@ struct Config {
     backup_dir: PathBuf,
     poll_interval: Duration,
     backup_timeout: Duration,
+    download_progress_interval: Duration,
+    download_progress_step_bytes: usize,
     delete_remote_after_download: bool,
     verify_archive: bool,
     expected_archive_entries: Vec<String>,
@@ -122,6 +124,14 @@ impl Config {
             ),
             poll_interval: Duration::from_secs(env_u64("POLL_INTERVAL_SECS", 60)?),
             backup_timeout: Duration::from_secs(env_u64("BACKUP_TIMEOUT_SECS", 7200)?),
+            download_progress_interval: Duration::from_secs(
+                env_u64("DOWNLOAD_PROGRESS_INTERVAL_SECS", 30)?.max(1),
+            ),
+            download_progress_step_bytes: env_usize(
+                "DOWNLOAD_PROGRESS_STEP_BYTES",
+                8 * 1024 * 1024,
+            )?
+            .max(1),
             delete_remote_after_download: env_bool("DELETE_REMOTE_AFTER_DOWNLOAD", true)?,
             verify_archive: env_bool("VERIFY_ARCHIVE", true)?,
             expected_archive_entries,
@@ -437,7 +447,9 @@ fn download_backup(
     let mut hasher = Sha256::new();
     let mut buf = [0_u8; 64 * 1024];
     let mut downloaded = 0_usize;
-    let mut next_progress_log = 32 * 1024 * 1024;
+    let started_at = Instant::now();
+    let mut last_progress_log = Instant::now();
+    let mut next_progress_log = config.download_progress_step_bytes;
     loop {
         if expected_size > 0 && downloaded >= expected_size {
             break;
@@ -457,15 +469,19 @@ fn download_backup(
             .with_context(|| format!("write temp backup {}", temp_path.display()))?;
         hasher.update(&buf[..n]);
         downloaded += n;
-        if downloaded >= next_progress_log || (expected_size > 0 && downloaded >= expected_size) {
+        if downloaded >= next_progress_log
+            || last_progress_log.elapsed() >= config.download_progress_interval
+            || (expected_size > 0 && downloaded >= expected_size)
+        {
             println!(
-                "{} downloaded {} / {} bytes",
-                now(),
-                downloaded,
-                expected_size
+                "{}",
+                download_progress_line(downloaded, expected_size, started_at)
             );
             let _ = std::io::stdout().flush();
-            next_progress_log += 32 * 1024 * 1024;
+            next_progress_log = (downloaded / config.download_progress_step_bytes)
+                .saturating_add(1)
+                .saturating_mul(config.download_progress_step_bytes);
+            last_progress_log = Instant::now();
         }
     }
     if expected_size > 0 && downloaded != expected_size {
@@ -485,6 +501,59 @@ fn download_backup(
         )
     })?;
     Ok(sha256)
+}
+
+fn download_progress_line(downloaded: usize, expected_size: usize, started_at: Instant) -> String {
+    format!(
+        "{} {}",
+        now(),
+        format_download_progress(downloaded, expected_size, started_at.elapsed())
+    )
+}
+
+fn format_download_progress(downloaded: usize, expected_size: usize, elapsed: Duration) -> String {
+    let elapsed_secs = elapsed.as_secs_f64().max(0.001);
+    let downloaded_mib = bytes_to_mib(downloaded);
+    let avg_mib_per_sec = downloaded_mib / elapsed_secs;
+
+    if expected_size > 0 {
+        let expected_mib = bytes_to_mib(expected_size);
+        let percent = (downloaded as f64 / expected_size as f64 * 100.0).min(100.0);
+        let remaining_mib = (expected_mib - downloaded_mib).max(0.0);
+        let eta = if avg_mib_per_sec > 0.0 {
+            format_duration_short(Duration::from_secs_f64(remaining_mib / avg_mib_per_sec))
+        } else {
+            "unknown".to_string()
+        };
+        format!(
+            "download progress: {:.1}% ({:.1}/{:.1} MiB), avg {:.2} MiB/s, eta {}",
+            percent, downloaded_mib, expected_mib, avg_mib_per_sec, eta
+        )
+    } else {
+        format!(
+            "download progress: {:.1} MiB downloaded, avg {:.2} MiB/s",
+            downloaded_mib, avg_mib_per_sec
+        )
+    }
+}
+
+fn bytes_to_mib(bytes: usize) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0
+}
+
+fn format_duration_short(duration: Duration) -> String {
+    let total_secs = duration.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        format!("{hours}h{minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 fn ftp_connect(config: &Config) -> Result<FtpStream> {

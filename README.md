@@ -87,6 +87,8 @@ For an exact wall-clock schedule, keep `RUN_MODE=once` and use the NAS scheduler
 | `RETENTION_KEEP_LAST` | `7` | Keep the latest N local backup archives |
 | `POLL_INTERVAL_SECS` | `60` | Poll interval while cPanel creates the backup |
 | `BACKUP_TIMEOUT_SECS` | `7200` | Maximum wait time for cPanel backup completion |
+| `DOWNLOAD_PROGRESS_INTERVAL_SECS` | `30` | Log download progress at least this often while bytes are flowing |
+| `DOWNLOAD_PROGRESS_STEP_BYTES` | `8388608` | Log download progress after this many additional bytes |
 | `RUN_MODE` | `once` | `once` or `daemon` |
 | `SCHEDULE_INTERVAL_SECS` | `86400` | Sleep interval in daemon mode |
 
